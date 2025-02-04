@@ -170,13 +170,14 @@ func SearchGists(queryStr string, queryMetadata SearchGistMetadata, gistsIds []u
 	addQuery("Extensions", "."+queryMetadata.Extension)
 	addQuery("Filenames", queryMetadata.Filename)
 	addQuery("Languages", queryMetadata.Language)
+	addQuery("Topics", queryMetadata.Topic)
 
 	languageFacet := bleve.NewFacetRequest("Languages", 10)
 
 	perPage := 10
 	offset := (page - 1) * perPage
 
-	s := bleve.NewSearchRequestOptions(indexerQuery, perPage, offset, false)
+	s := bleve.NewSearchRequestOptions(indexerQuery, perPage+1, offset, false)
 	s.AddFacet("languageFacet", languageFacet)
 	s.Fields = []string{"GistID"}
 	s.IncludeLocations = false

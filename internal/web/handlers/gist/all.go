@@ -9,8 +9,7 @@ import (
 	"github.com/thomiceli/opengist/internal/web/context"
 	"github.com/thomiceli/opengist/internal/web/handlers"
 	"gorm.io/gorm"
-	"html/template"
-	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -37,6 +36,11 @@ func AllGists(ctx *context.Context) error {
 		orderText = ctx.TrH("gist.list.order-by-asc")
 	}
 
+	pagination := &handlers.PaginationParams{
+		Sort:  sort,
+		Order: order,
+	}
+
 	ctx.SetData("sort", sortText)
 	ctx.SetData("order", orderText)
 
@@ -48,36 +52,27 @@ func AllGists(ctx *context.Context) error {
 		currentUserId = 0
 	}
 
+	mode := ctx.GetData("mode")
 	if fromUserStr == "" {
-		urlctx := ctx.Request().URL.Path
-		if strings.HasSuffix(urlctx, "search") {
+		if mode == "search" {
 			ctx.SetData("htmlTitle", ctx.TrH("gist.list.search-results"))
-			ctx.SetData("mode", "search")
 			ctx.SetData("searchQuery", ctx.QueryParam("q"))
-			ctx.SetData("searchQueryUrl", template.URL("&q="+ctx.QueryParam("q")))
+			pagination.Query = ctx.QueryParam("q")
 			urlPage = "search"
-			gists, err = db.GetAllGistsFromSearch(currentUserId, ctx.QueryParam("q"), pageInt-1, sort, order)
-		} else if strings.HasSuffix(urlctx, "all") {
+			gists, err = db.GetAllGistsFromSearch(currentUserId, ctx.QueryParam("q"), pageInt-1, sort, order, "")
+		} else if mode == "topics" {
+			ctx.SetData("htmlTitle", ctx.TrH("gist.list.topic-results-topic", ctx.Param("topic")))
+			ctx.SetData("topic", ctx.Param("topic"))
+			urlPage = "topics/" + ctx.Param("topic")
+			gists, err = db.GetAllGistsFromSearch(currentUserId, "", pageInt-1, sort, order, ctx.Param("topic"))
+		} else if mode == "all" {
 			ctx.SetData("htmlTitle", ctx.TrH("gist.list.all"))
-			ctx.SetData("mode", "all")
 			urlPage = "all"
 			gists, err = db.GetAllGistsForCurrentUser(currentUserId, pageInt-1, sort, order)
 		}
 	} else {
-		liked := false
-		forked := false
-
-		liked, err = regexp.MatchString(`/[^/]*/liked`, ctx.Request().URL.Path)
-		if err != nil {
-			return ctx.ErrorRes(500, "Error matching regexp", err)
-		}
-
-		forked, err = regexp.MatchString(`/[^/]*/forked`, ctx.Request().URL.Path)
-		if err != nil {
-			return ctx.ErrorRes(500, "Error matching regexp", err)
-		}
-
 		var fromUser *db.User
+		var count int64
 
 		fromUser, err = db.GetUserByUsername(fromUserStr)
 		if err != nil {
@@ -106,22 +101,48 @@ func AllGists(ctx *context.Context) error {
 			ctx.SetData("countForked", countForked)
 		}
 
-		if liked {
+		if mode == "liked" {
 			urlPage = fromUserStr + "/liked"
 			ctx.SetData("htmlTitle", ctx.TrH("gist.list.all-liked-by", fromUserStr))
-			ctx.SetData("mode", "liked")
 			gists, err = db.GetAllGistsLikedByUser(fromUser.ID, currentUserId, pageInt-1, sort, order)
-		} else if forked {
+		} else if mode == "forked" {
 			urlPage = fromUserStr + "/forked"
 			ctx.SetData("htmlTitle", ctx.TrH("gist.list.all-forked-by", fromUserStr))
-			ctx.SetData("mode", "forked")
 			gists, err = db.GetAllGistsForkedByUser(fromUser.ID, currentUserId, pageInt-1, sort, order)
-		} else {
+		} else if mode == "fromUser" {
 			urlPage = fromUserStr
+
+			if languages, err := db.GetGistLanguagesForUser(fromUser.ID, currentUserId); err != nil {
+				return ctx.ErrorRes(500, "Error fetching languages", err)
+			} else {
+				ctx.SetData("languages", languages)
+			}
+			title := ctx.QueryParam("title")
+			language := ctx.QueryParam("language")
+			visibility := ctx.QueryParam("visibility")
+			topicsStr := ctx.QueryParam("topics")
+			topics := strings.Fields(topicsStr)
+			if len(topics) > 10 {
+				topics = topics[:10]
+			}
+			slices.Sort(topics)
+			topics = slices.Compact(topics)
+			pagination.Title = title
+			pagination.Language = language
+			pagination.Visibility = visibility
+			pagination.Topics = topicsStr
+
+			ctx.SetData("title", title)
+			ctx.SetData("language", language)
+			ctx.SetData("visibility", visibility)
+			ctx.SetData("topics", topicsStr)
 			ctx.SetData("htmlTitle", ctx.TrH("gist.list.all-from", fromUserStr))
-			ctx.SetData("mode", "fromUser")
-			gists, err = db.GetAllGistsFromUser(fromUser.ID, currentUserId, pageInt-1, sort, order)
+			gists, count, err = db.GetAllGistsFromUser(fromUser.ID, currentUserId, title, language, visibility, topics, pageInt-1, sort, order)
+			ctx.SetData("countFromUser", count)
 		}
+	}
+	if err != nil {
+		return ctx.ErrorRes(500, "Error fetching gists", err)
 	}
 
 	renderedGists := make([]*render.RenderedGist, 0, len(gists))
@@ -133,20 +154,19 @@ func AllGists(ctx *context.Context) error {
 		renderedGists = append(renderedGists, &rendered)
 	}
 
-	if err != nil {
-		return ctx.ErrorRes(500, "Error fetching gists", err)
-	}
-
-	if err = handlers.Paginate(ctx, renderedGists, pageInt, 10, "gists", fromUserStr, 2, "&sort="+sort+"&order="+order); err != nil {
+	if err = handlers.Paginate(ctx, renderedGists, pageInt, 10, "gists", urlPage, 2, pagination); err != nil {
 		return ctx.ErrorRes(404, ctx.Tr("error.page-not-found"), nil)
 	}
 
-	ctx.SetData("urlPage", urlPage)
 	return ctx.Html("all.html")
 }
 
 func Search(ctx *context.Context) error {
 	var err error
+
+	pagination := &handlers.PaginationParams{
+		Query: ctx.QueryParam("q"),
+	}
 
 	content, meta := handlers.ParseSearchQueryStr(ctx.QueryParam("q"))
 	pageInt := handlers.GetPage(ctx)
@@ -171,6 +191,7 @@ func Search(ctx *context.Context) error {
 		Filename:  meta["filename"],
 		Extension: meta["extension"],
 		Language:  meta["language"],
+		Topic:     meta["topic"],
 	}, visibleGistsIds, pageInt)
 	if err != nil {
 		return ctx.ErrorRes(500, "Error searching gists", err)
@@ -190,19 +211,12 @@ func Search(ctx *context.Context) error {
 		renderedGists = append(renderedGists, &rendered)
 	}
 
-	if pageInt > 1 && len(renderedGists) != 0 {
-		ctx.SetData("prevPage", pageInt-1)
+	if err = handlers.Paginate(ctx, renderedGists, pageInt, 10, "gists", "search", 2, pagination); err != nil {
+		return ctx.ErrorRes(404, ctx.Tr("error.page-not-found"), nil)
 	}
-	if 10*pageInt < int(nbHits) {
-		ctx.SetData("nextPage", pageInt+1)
-	}
-	ctx.SetData("prevLabel", ctx.TrH("pagination.previous"))
-	ctx.SetData("nextLabel", ctx.TrH("pagination.next"))
-	ctx.SetData("urlPage", "search")
-	ctx.SetData("urlParams", template.URL("&q="+ctx.QueryParam("q")))
+
 	ctx.SetData("htmlTitle", ctx.TrH("gist.list.search-results"))
 	ctx.SetData("nbHits", nbHits)
-	ctx.SetData("gists", renderedGists)
 	ctx.SetData("langs", langs)
 	ctx.SetData("searchQuery", ctx.QueryParam("q"))
 	return ctx.Html("search.html")

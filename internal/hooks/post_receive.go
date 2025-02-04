@@ -46,7 +46,7 @@ func PostReceive(in io.Reader, out, er io.Writer) error {
 	}
 
 	if slices.Contains([]string{"public", "unlisted", "private"}, opts["visibility"]) {
-		gist.Private, _ = db.ParseVisibility(opts["visibility"])
+		gist.Private = db.ParseVisibility(opts["visibility"])
 		outputSb.WriteString(fmt.Sprintf("Gist visibility set to %s\n\n", opts["visibility"]))
 	}
 
@@ -63,6 +63,11 @@ func PostReceive(in io.Reader, out, er io.Writer) error {
 	if opts["title"] != "" && validator.Var(opts["title"], "max=250") == nil {
 		gist.Title = opts["title"]
 		outputSb.WriteString(fmt.Sprintf("Gist title set to \"%s\"\n\n", opts["title"]))
+	}
+
+	if opts["description"] != "" && validator.Var(opts["description"], "max=1000") == nil {
+		gist.Description = opts["description"]
+		outputSb.WriteString(fmt.Sprintf("Gist description set to \"%s\"\n\n", opts["description"]))
 	}
 
 	if hasNoCommits, err := git.HasNoCommits(gist.User.Username, gist.Uuid); err != nil {
